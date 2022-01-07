@@ -110,7 +110,7 @@ public class UnionDeserializer<Union, Kind, Member> implements JsonpDeserializer
 
         private final BiFunction<Kind, Member, Union> buildFn;
 
-        private final List<UnionDeserializer.SingleMemberHandler<Union, Kind, Member>> objectMembers = new ArrayList<>();
+        private final Map<Kind, UnionDeserializer.SingleMemberHandler<Union, Kind, Member>> objectMembers = new HashMap<>();
         private final Map<Event, EventHandler<Union, Kind, Member>> otherMembers = new HashMap<>();
         private final boolean allowAmbiguousPrimitive;
 
@@ -156,15 +156,9 @@ public class UnionDeserializer<Union, Kind, Member> implements JsonpDeserializer
             JsonpDeserializer<?> unwrapped = DelegatingDeserializer.unwrap(deserializer);
             if (unwrapped instanceof ObjectDeserializer) {
                 ObjectDeserializer<?> od = (ObjectDeserializer<?>) unwrapped;
-                Set<String> allFields = od.fieldNames();
-                Set<String> fields = new HashSet<>(allFields); // copy to update
-                for (UnionDeserializer.SingleMemberHandler<Union, Kind, Member> member: objectMembers) {
-                    // Remove respective fields on both sides to keep specific ones
-                    fields.removeAll(member.fields);
-                    member.fields.removeAll(allFields);
-                }
+                Set<String> fields = od.fieldNames();
                 UnionDeserializer.SingleMemberHandler<Union, Kind, Member> member = new SingleMemberHandler<>(tag, deserializer, fields);
-                objectMembers.add(member);
+                objectMembers.put(tag, member);
                 if (od.shortcutProperty() != null) {
                     // also add it as a string
                     addMember(Event.VALUE_STRING, tag, member);
@@ -182,15 +176,16 @@ public class UnionDeserializer<Union, Kind, Member> implements JsonpDeserializer
         @Override
         public JsonpDeserializer<Union> build() {
             // Check that no object member had all its fields removed
-            for (UnionDeserializer.SingleMemberHandler<Union, Kind, Member> member: objectMembers) {
-                if (member.fields.isEmpty()) {
-                    throw new AmbiguousUnionException("All properties of '" + member.tag + "' also exist in other object members");
+            for (Map.Entry<Kind, SingleMemberHandler<Union, Kind, Member>> member: objectMembers.entrySet()) {
+                if (member.getValue().fields.isEmpty()) {
+                    throw new AmbiguousUnionException("All properties of '" + member.getKey() + "' also exist in other object members");
                 }
             }
 
             if (objectMembers.size() == 1 && !otherMembers.containsKey(Event.START_OBJECT)) {
                 // A single deserializer handles objects: promote it to otherMembers as we don't need property-based disambiguation
-                otherMembers.put(Event.START_OBJECT, objectMembers.remove(0));
+                otherMembers.put(Event.START_OBJECT, objectMembers.values().iterator().next());
+                objectMembers.clear();
             }
 
 //            if (objectMembers.size() > 1) {
@@ -203,29 +198,17 @@ public class UnionDeserializer<Union, Kind, Member> implements JsonpDeserializer
 
     private final BiFunction<Kind, Member, Union> buildFn;
     private final EnumSet<Event> nativeEvents;
-    private final Map<String, EventHandler<Union, Kind, Member>> objectMembers;
+    private final Map<Kind, SingleMemberHandler<Union, Kind, Member>> objectMembers;
     private final Map<Event, EventHandler<Union, Kind, Member>> otherMembers;
     private final EventHandler<Union, Kind, Member> fallbackObjectMember;
 
     public UnionDeserializer(
-        List<SingleMemberHandler<Union, Kind, Member>> objectMembers,
+        Map<Kind, SingleMemberHandler<Union, Kind, Member>> objectMembers,
         Map<Event, EventHandler<Union, Kind, Member>> otherMembers,
         BiFunction<Kind, Member, Union> buildFn
     ) {
         this.buildFn = buildFn;
-
-        // Build a map of (field name -> member) for all fields to speed up lookup
-        if (objectMembers.isEmpty()) {
-            this.objectMembers = Collections.emptyMap();
-        } else {
-            this.objectMembers = new HashMap<>();
-            for (SingleMemberHandler<Union, Kind, Member> member: objectMembers) {
-                for (String field: member.fields) {
-                    this.objectMembers.put(field, member);
-                }
-            }
-        }
-
+        this.objectMembers = objectMembers;
         this.otherMembers = otherMembers;
 
         this.nativeEvents = EnumSet.noneOf(Event.class);
@@ -266,11 +249,13 @@ public class UnionDeserializer<Union, Kind, Member> implements JsonpDeserializer
         if (member == null && event == Event.START_OBJECT && !objectMembers.isEmpty()) {
             // Parse as an object to find matching field names
             JsonObject object = parser.getObject();
-
-            for (String field: object.keySet()) {
-                member = objectMembers.get(field);
-                if (member != null) {
-                    break;
+            for (Map.Entry<Kind, SingleMemberHandler<Union, Kind, Member>> handlerEntry : objectMembers.entrySet()) {
+                SingleMemberHandler<Union, Kind, Member> handler = handlerEntry.getValue();
+                if(handler.fields.containsAll(object.keySet())){
+                    if (member != null){
+                        throw new JsonParsingException("Cannot determine what union member to deserialize", parser.getLocation());
+                    }
+                    member = handler;
                 }
             }
 
